@@ -10,6 +10,7 @@ import { checkChrome } from "./tiktok.js";
 import { createStoryboardDraft, startPatternAnalysis } from "./analysis-jobs.js";
 import { normalizePinterestQuery, searchPinterest } from "./pinterest.js";
 import { renderCarouselZip } from "./carousel-renderer.js";
+import { isRemixRunning, startRemixJob } from "./remix-jobs.js";
 
 const briefSchema = z.object({
   topic: z.string().trim().min(2).max(300),
@@ -23,14 +24,14 @@ const briefSchema = z.object({
 const createSessionSchema = z.object({
   title: z.string().trim().min(2).max(120),
   brief: briefSchema,
-  queries: z.array(z.string().trim().min(2).max(160)).min(1).max(30),
-  targetResults: z.number().int().min(25).max(1_000).default(100),
+  queries: z.array(z.string().trim().min(2).max(160)).min(1).max(300),
+  targetResults: z.number().int().min(25).max(10_000).default(100),
 });
 
 const createRunSchema = z.object({
   title: z.string().trim().max(120).optional(),
-  queries: z.array(z.string().trim().min(2).max(160)).min(1).max(30),
-  targetResults: z.number().int().min(25).max(1_000),
+  queries: z.array(z.string().trim().min(2).max(160)).min(1).max(300),
+  targetResults: z.number().int().min(25).max(10_000),
   excludeSeen: z.boolean().default(true),
   saveAsDefaults: z.boolean().default(true),
 });
@@ -80,8 +81,20 @@ const storyboardVariantsSchema = z.object({
         textScale: z.number().min(0.7).max(1.5),
       }),
     })).min(1).max(15),
-  })).length(3),
+  })).min(1).max(20),
 });
+const remixCreateSchema = z.object({
+  sourceUrl: z.string().url(),
+  sourcePostId: z.string().min(1).optional(),
+  folderId: z.string().uuid().nullable().optional(),
+  autoFolder: z.boolean().default(true),
+  requestedVariants: z.number().int().min(1).max(20),
+  includeApp: z.boolean().default(true),
+  appBrief: appBriefSchema,
+  instructions: z.string().trim().max(1_000).default(""),
+});
+const remixFolderSchema = z.object({ name: z.string().trim().min(1).max(80) });
+const remixMoveSchema = z.object({ folderId: z.string().uuid().nullable() });
 const pinterestSearchSchema = z.object({
   query: z.string().trim().min(2).max(120),
   limit: z.number().int().min(5).max(40).default(20),
@@ -111,6 +124,63 @@ export function createApp(database: CarouselDatabase) {
 
   app.get("/api/drafts", (_request, response) => {
     response.json({ drafts: database.listAllDrafts() });
+  });
+
+  app.get("/api/remix", (_request, response) => {
+    response.json({
+      folders: database.listRemixFolders(),
+      items: database.listRemixItems().map((item) => ({ ...item, running: isRemixRunning(item.id) })),
+    });
+  });
+
+  app.post("/api/remix/folders", (request, response) => {
+    const { name } = remixFolderSchema.parse(request.body);
+    response.status(201).json(database.createRemixFolder(name));
+  });
+
+  app.post("/api/remix/items", async (request, response) => {
+    const input = remixCreateSchema.parse(request.body);
+    const sourcePost = input.sourcePostId ? database.getPost(input.sourcePostId) : null;
+    if (input.sourcePostId && !sourcePost) return response.status(404).json({ error: "Исходная карусель не найдена" });
+    if (!sourcePost) {
+      const health = await checkChrome();
+      if (!health.connected) return response.status(409).json({ error: "Для импорта ссылки подключите исследовательский Chrome" });
+    }
+    const item = database.createRemixItem({
+      ...input,
+      sourceUrl: sourcePost?.url || input.sourceUrl,
+    });
+    startRemixJob(database, item.id);
+    return response.status(202).json({ ...item, running: true });
+  });
+
+  app.get("/api/remix/items/:itemId", (request, response) => {
+    const item = database.getRemixItem(request.params.itemId);
+    if (!item) return response.status(404).json({ error: "Remix-проект не найден" });
+    return response.json({ ...item, running: isRemixRunning(item.id) });
+  });
+
+  app.post("/api/remix/items/:itemId/retry", (request, response) => {
+    const item = database.getRemixItem(request.params.itemId);
+    if (!item) return response.status(404).json({ error: "Remix-проект не найден" });
+    if (isRemixRunning(item.id)) return response.status(409).json({ error: "Обработка уже идёт" });
+    const queued = database.queueRemixItem(item.id)!;
+    startRemixJob(database, item.id);
+    return response.status(202).json({ ...queued, running: true });
+  });
+
+  app.patch("/api/remix/items/:itemId", (request, response) => {
+    const { variants } = storyboardVariantsSchema.parse(request.body);
+    const item = database.updateRemixVariants(request.params.itemId, variants);
+    if (!item) return response.status(404).json({ error: "Remix-проект не найден" });
+    return response.json(item);
+  });
+
+  app.patch("/api/remix/items/:itemId/folder", (request, response) => {
+    const { folderId } = remixMoveSchema.parse(request.body);
+    const item = database.moveRemixItem(request.params.itemId, folderId);
+    if (!item) return response.status(404).json({ error: "Remix-проект не найден" });
+    return response.json(item);
   });
 
   app.post("/api/sessions", (request, response) => {
@@ -219,13 +289,27 @@ export function createApp(database: CarouselDatabase) {
 
   app.post("/api/sessions/:sessionId/drafts/:draftId/export", async (request, response) => {
     const { variantIndex, includeText } = z.object({
-      variantIndex: z.number().int().min(0).max(2),
+      variantIndex: z.number().int().min(0).max(19),
       includeText: z.boolean().default(true),
     }).parse(request.body);
     const draft = database.getDraft(request.params.sessionId, request.params.draftId);
     if (!draft) return response.status(404).json({ error: "Storyboard не найден" });
     const archive = await renderCarouselZip(draft, variantIndex, includeText);
     const filename = `${draft.appBrief.appName.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-") || "carousel"}-carousel${includeText ? "" : "-no-text"}.zip`;
+    response.setHeader("content-type", "application/zip");
+    response.setHeader("content-disposition", `attachment; filename="${filename}"`);
+    response.send(archive);
+  });
+
+  app.post("/api/remix/items/:itemId/export", async (request, response) => {
+    const item = database.getRemixItem(request.params.itemId);
+    if (!item) return response.status(404).json({ error: "Remix-проект не найден" });
+    const { variantIndex, includeText } = z.object({
+      variantIndex: z.number().int().min(0).max(19),
+      includeText: z.boolean().default(true),
+    }).parse(request.body);
+    const archive = await renderCarouselZip(item, variantIndex, includeText);
+    const filename = `${item.appBrief.appName.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-") || "remix"}-remix${includeText ? "" : "-no-text"}.zip`;
     response.setHeader("content-type", "application/zip");
     response.setHeader("content-disposition", `attachment; filename="${filename}"`);
     response.send(archive);

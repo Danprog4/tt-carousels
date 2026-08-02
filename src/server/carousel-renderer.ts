@@ -2,7 +2,7 @@ import sharp from "sharp";
 import { strToU8, zipSync } from "fflate";
 import { Resvg } from "@resvg/resvg-js";
 import { fileURLToPath } from "node:url";
-import type { CarouselDraft, StoryboardSlide } from "../shared/types.js";
+import type { AppBrief, StoryboardSlide, StoryboardVariant } from "../shared/types.js";
 import { getCachedSourceImage } from "./media-cache.js";
 
 const WIDTH = 1_080;
@@ -106,7 +106,7 @@ export async function renderCarouselSlide(slide: StoryboardSlide, _appName: stri
   return base.composite([{ input: textOverlay(slide), top: 0, left: 0 }]).png({ compressionLevel: 8 }).toBuffer();
 }
 
-export async function renderCarouselZip(draft: CarouselDraft, variantIndex: number, includeText = true): Promise<Buffer> {
+export async function renderCarouselZip(draft: { appBrief: AppBrief; variants: StoryboardVariant[] }, variantIndex: number, includeText = true): Promise<Buffer> {
   const variant = draft.variants[variantIndex];
   if (!variant) throw new Error("Вариант storyboard не найден");
   const files: Record<string, Uint8Array> = {};

@@ -5,8 +5,10 @@ import { z } from "zod";
 import type { AppBrief, CarouselPlaybook, ResearchBrief } from "../shared/types.js";
 import { AI_MODEL, AI_PROVIDER } from "./ai-contract.js";
 import { assertRequiredAppIntegration, storyboardBatchSchema } from "./draft-contract.js";
+import { NATIVE_TIKTOK_COPY_RULES, nativeCopyIssues, SIMPLE_PINTEREST_QUERY_RULES } from "./storyboard-style.js";
+import type { ToneReference } from "./visual-contract.js";
 
-interface Input { brief: ResearchBrief; playbook: CarouselPlaybook; appBrief: AppBrief; evidence: unknown[] }
+interface Input { brief: ResearchBrief; playbook: CarouselPlaybook; appBrief: AppBrief; evidence: unknown[]; toneReferences: ToneReference[] }
 async function readStdin() { const chunks: Buffer[] = []; for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk)); return Buffer.concat(chunks).toString("utf8"); }
 
 try {
@@ -18,25 +20,41 @@ try {
   const jsonSchema = z.toJSONSchema(storyboardBatchSchema, { io: "output" }) as Record<string, unknown>;
   delete jsonSchema.$schema;
   try {
-    const message = await runtime.completeSimple(model, {
-      systemPrompt: `Create exactly three editable TikTok carousel storyboard variants based on a real evidence-backed playbook. Preserve the proven slide mechanics but do not copy source text or imagery.
+    const content: any[] = [{
+      type: "text",
+      text: JSON.stringify({ brief: input.brief, playbook: input.playbook, appBrief: input.appBrief, evidence: input.evidence }),
+    }];
+    for (const reference of input.toneReferences || []) {
+      content.push({ type: "text", text: `TONE REFERENCE ${reference.postId} by @${reference.creator}. Caption: ${JSON.stringify(reference.caption)}. The next ${reference.slidesBase64.length} images are the full carousel in exact slide order. Read the visible wording across ALL slides before writing.` });
+      reference.slidesBase64.forEach((data, index) => {
+        content.push({ type: "text", text: `Reference ${reference.postId}, slide ${index + 1}.` });
+        content.push({ type: "image", data, mimeType: "image/jpeg" });
+      });
+    }
+    const systemPrompt = `Create exactly three editable TikTok photo-carousel variants based on a real evidence-backed playbook and the supplied full-carousel tone references. Preserve the useful mechanics, but do not copy exact source sentences or imagery.
+
+Before writing, silently read every reference slide in order. Infer how a real person talks across the whole carousel: sentence length, casing, slang level, punctuation, POV, bluntness, rhythm, and how one slide leads to the next. Keep the three variants meaningfully different, but inside the same observed internet voice.
+
+${NATIVE_TIKTOK_COPY_RULES}
 
 NON-NEGOTIABLE COMMERCIAL RULES FOR EVERY VARIANT:
 - The supplied app must always be advertised, even when the source playbook and evidence contain no product.
 - Use 1–2 slides with product_slide=true. Never put the first product slide at slide 1: establish the pain, mechanism or useful advice first.
-- Name the supplied app explicitly in the on-slide copy and end with the supplied App Store CTA.
+- Name the supplied app explicitly. Treat appBrief as facts, not ready-made copy: rewrite its promise and CTA in the same casual voice as the source. Do not paste a formal CTA verbatim.
 - Choose the insertion point from the meaning of the story. The preceding slide must create a real need that the app solves; the app slide must explain the relevant mechanism or benefit from appBrief, then the carousel may continue delivering value.
-- The app should feel like one concrete, useful next step inside the advice—not an unrelated sponsor card. Do not hide or omit the commercial intent.
+- The app slide must sound like the same person wrote it, not like the brand took over. It should feel like one useful next step inside the advice.
 - For a playbook with no observed product, invent only the transition and product integration; keep the evidence-backed hook and narrative mechanics intact.
 
-Each variant must have sequential slide indices starting at 1 and cite only provided source post ids. Write final on-slide copy in English unless the research brief explicitly asks for another language. Keep copy concise enough for a mobile carousel. Write visual_brief in Russian. Every visual_brief must state the asset approach: original/licensed photo, AI-generated image, app screenshot/mockup, or graphic card. Product slides should call for real app screenshots/logo when available and must not invent interface details.
+Each variant must have sequential slide indices starting at 1 and cite only provided source post ids. Use the language visible in the references unless the research brief explicitly requires another language. Write visual_brief in Russian. Every visual_brief must state the asset approach: original/licensed photo, AI-generated image, app screenshot/mockup, or graphic card. Product slides should call for real app screenshots/logo when available and must not invent interface details.
 
-For every non-product slide, provide pinterest_query: a concrete 3–8 word English Pinterest image search query describing the visible subject, gender and aesthetic—not the abstract lesson or on-slide copy. Avoid words like TikTok, carousel, slide or text. For product slides return an empty pinterest_query because they use the app asset/template.
+${SIMPLE_PINTEREST_QUERY_RULES}
 
 Variant 1: safe evidence adaptation with the app as a useful tip.
 Variant 2: mid-carousel app workflow connected to the strongest pain point.
-Variant 3: fresh angle where personalization by the app is the payoff of the same proven structure.`,
-      messages: [{ role: "user", timestamp: Date.now(), content: [{ type: "text", text: JSON.stringify(input) }] }],
+Variant 3: fresh angle where personalization by the app is the payoff of the same proven structure.`;
+    const complete = (feedback = "") => runtime.completeSimple(model, {
+      systemPrompt: `${systemPrompt}${feedback ? `\n\nQUALITY GATE FEEDBACK — REGENERATE FROM SCRATCH:\n${feedback}` : ""}`,
+      messages: [{ role: "user", timestamp: Date.now(), content }],
     }, {
       reasoning: "low", transport: "sse", sessionId, maxTokens: 9_000, timeoutMs: 150_000, maxRetries: 1,
       onPayload: (rawPayload) => {
@@ -44,9 +62,19 @@ Variant 3: fresh angle where personalization by the app is the payoff of the sam
         return { ...payload, text: { ...(payload.text || {}), format: { type: "json_schema", name: "carousel_storyboards", strict: true, schema: jsonSchema } } };
       },
     });
+    let message = await complete();
     if (message.stopReason === "error") throw new Error(message.errorMessage || "Не удалось создать storyboard");
-    const text = message.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("");
-    const result = storyboardBatchSchema.parse(JSON.parse(text));
+    let text = message.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("");
+    let result = storyboardBatchSchema.parse(JSON.parse(text));
+    let issues = nativeCopyIssues(result, input.brief.topic);
+    if (issues.length) {
+      message = await complete(issues.map((issue) => `- ${issue}`).join("\n"));
+      if (message.stopReason === "error") throw new Error(message.errorMessage || "Не удалось переписать storyboard нативно");
+      text = message.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("");
+      result = storyboardBatchSchema.parse(JSON.parse(text));
+      issues = nativeCopyIssues(result, input.brief.topic);
+      if (issues.length) throw new Error(`Текст не прошёл TikTok quality gate: ${issues[0]}`);
+    }
     assertRequiredAppIntegration(result, input.appBrief.appName);
     process.stdout.write(JSON.stringify({ variants: result.variants, usage: { input: message.usage.input, output: message.usage.output } }));
   } finally { closeOpenAICodexWebSocketSessions(sessionId); }

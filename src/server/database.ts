@@ -19,6 +19,9 @@ import type {
   ResearchProject,
   ResearchSession,
   ResearchSessionSummary,
+  RemixFolder,
+  RemixItem,
+  RemixStatus,
   SessionPost,
   SessionStatus,
   StoryboardVariant,
@@ -118,6 +121,45 @@ interface PinterestCacheRow {
   query: string;
   results_json: string;
   created_at: string;
+}
+
+interface PostRow {
+  id: string;
+  url: string;
+  author_username: string;
+  author_display_name: string | null;
+  caption: string;
+  post_created_at: string | null;
+  slides_json: string;
+  sound_json: string;
+  metrics_json: string;
+}
+
+interface RemixFolderRow {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  item_count?: number;
+}
+
+interface RemixItemRow {
+  id: string;
+  folder_id: string | null;
+  source_url: string;
+  source_post_id: string | null;
+  status: RemixStatus;
+  requested_variants: number;
+  completed_variants: number;
+  include_app: number;
+  auto_folder: number;
+  app_brief_json: string;
+  instructions: string;
+  visual_profile_json: string | null;
+  variants_json: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 const parseJson = <T>(value: string, fallback: T): T => {
@@ -241,8 +283,36 @@ export class CarouselDatabase {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS remix_folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS remix_items (
+        id TEXT PRIMARY KEY,
+        folder_id TEXT REFERENCES remix_folders(id) ON DELETE SET NULL,
+        source_url TEXT NOT NULL,
+        source_post_id TEXT REFERENCES posts(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        requested_variants INTEGER NOT NULL DEFAULT 3,
+        completed_variants INTEGER NOT NULL DEFAULT 0,
+        include_app INTEGER NOT NULL DEFAULT 1,
+        auto_folder INTEGER NOT NULL DEFAULT 1,
+        app_brief_json TEXT NOT NULL,
+        instructions TEXT NOT NULL DEFAULT '',
+        visual_profile_json TEXT,
+        variants_json TEXT NOT NULL DEFAULT '[]',
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_analysis_runs_session ON analysis_runs(session_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_carousel_drafts_session ON carousel_drafts(session_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_remix_items_folder ON remix_items(folder_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_remix_items_status ON remix_items(status, updated_at DESC);
     `);
     this.ensureColumn("session_posts", "pinned", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("session_posts", "visual_status", "TEXT NOT NULL DEFAULT 'pending'");
@@ -308,6 +378,11 @@ export class CarouselDatabase {
       UPDATE analysis_runs
       SET status = 'interrupted', error = 'Анализ был остановлен вместе с приложением', updated_at = ?
       WHERE status IN ('queued', 'running')
+    `).run(now);
+    this.db.prepare(`
+      UPDATE remix_items
+      SET status = 'interrupted', error = 'Фоновая задача была остановлена вместе с приложением', updated_at = ?
+      WHERE status IN ('queued', 'importing', 'analyzing', 'generating')
     `).run(now);
   }
 
@@ -455,12 +530,12 @@ export class CarouselDatabase {
     `).run(completedQueries, currentQuery, new Date().toISOString(), sessionId);
   }
 
-  setSearchFinished(sessionId: string, error?: string): void {
+  setSearchFinished(sessionId: string, error?: string, partial = false): void {
     this.db.prepare(`
       UPDATE sessions
       SET status = ?, error = ?, current_query = NULL, updated_at = ?
       WHERE id = ?
-    `).run(error ? "failed" : "complete", error || null, new Date().toISOString(), sessionId);
+    `).run(error ? "failed" : partial ? "partial" : "complete", error || null, new Date().toISOString(), sessionId);
   }
 
   upsertPost(sessionId: string, post: CarouselPost, query: string, rank: number): void {
@@ -514,6 +589,43 @@ export class CarouselDatabase {
       `).run(sessionId, post.id, JSON.stringify(searchQueries), bestRank, now, now);
     });
     transaction();
+  }
+
+  upsertSourcePost(post: CarouselPost): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO posts (
+        id, url, author_username, author_display_name, caption, post_created_at,
+        slides_json, sound_json, metrics_json, first_seen_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        url = excluded.url,
+        author_username = excluded.author_username,
+        author_display_name = excluded.author_display_name,
+        caption = excluded.caption,
+        post_created_at = excluded.post_created_at,
+        slides_json = excluded.slides_json,
+        sound_json = excluded.sound_json,
+        metrics_json = excluded.metrics_json,
+        updated_at = excluded.updated_at
+    `).run(
+      post.id,
+      post.url,
+      post.author.username,
+      post.author.displayName || null,
+      post.caption,
+      post.createdAt || null,
+      JSON.stringify(post.slides),
+      JSON.stringify(post.sound || {}),
+      JSON.stringify(post.metrics),
+      now,
+      now,
+    );
+  }
+
+  getPost(postId: string): CarouselPost | null {
+    const row = this.db.prepare("SELECT * FROM posts WHERE id = ?").get(postId) as PostRow | undefined;
+    return row ? this.mapPost(row) : null;
   }
 
   hasPostInOtherProjectRun(projectId: string, sessionId: string, postId: string): boolean {
@@ -664,6 +776,143 @@ export class CarouselDatabase {
     };
   }
 
+  createRemixFolder(name: string): RemixFolder {
+    const normalized = name.trim();
+    if (!normalized) throw new Error("Название папки не может быть пустым");
+    const existing = this.db.prepare("SELECT id FROM remix_folders WHERE lower(name) = lower(?) LIMIT 1").get(normalized) as { id: string } | undefined;
+    if (existing) return this.listRemixFolders().find((folder) => folder.id === existing.id)!;
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare("INSERT INTO remix_folders (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)").run(id, normalized, now, now);
+    return { id, name: normalized, itemCount: 0, createdAt: now, updatedAt: now };
+  }
+
+  listRemixFolders(): RemixFolder[] {
+    const rows = this.db.prepare(`
+      SELECT f.*, COUNT(i.id) AS item_count
+      FROM remix_folders f
+      LEFT JOIN remix_items i ON i.folder_id = f.id
+      GROUP BY f.id
+      ORDER BY f.updated_at DESC, f.name ASC
+    `).all() as RemixFolderRow[];
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      itemCount: Number(row.item_count || 0),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  createRemixItem(input: {
+    sourceUrl: string;
+    sourcePostId?: string | null;
+    folderId?: string | null;
+    autoFolder: boolean;
+    requestedVariants: number;
+    includeApp: boolean;
+    appBrief: AppBrief;
+    instructions: string;
+  }): RemixItem {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO remix_items (
+        id, folder_id, source_url, source_post_id, status, requested_variants,
+        completed_variants, include_app, auto_folder, app_brief_json, instructions,
+        visual_profile_json, variants_json, error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'queued', ?, 0, ?, ?, ?, ?, NULL, '[]', NULL, ?, ?)
+    `).run(
+      id,
+      input.folderId || null,
+      input.sourceUrl,
+      input.sourcePostId || null,
+      input.requestedVariants,
+      input.includeApp ? 1 : 0,
+      input.autoFolder ? 1 : 0,
+      JSON.stringify(input.appBrief),
+      input.instructions.trim(),
+      now,
+      now,
+    );
+    return this.getRemixItem(id)!;
+  }
+
+  listRemixItems(): RemixItem[] {
+    const rows = this.db.prepare("SELECT * FROM remix_items ORDER BY updated_at DESC").all() as RemixItemRow[];
+    return rows.map((row) => this.mapRemixItem(row));
+  }
+
+  getRemixItem(itemId: string): RemixItem | null {
+    const row = this.db.prepare("SELECT * FROM remix_items WHERE id = ?").get(itemId) as RemixItemRow | undefined;
+    return row ? this.mapRemixItem(row) : null;
+  }
+
+  setRemixSource(itemId: string, post: CarouselPost): RemixItem {
+    this.upsertSourcePost(post);
+    this.db.prepare(`
+      UPDATE remix_items SET source_post_id = ?, source_url = ?, updated_at = ? WHERE id = ?
+    `).run(post.id, post.url, new Date().toISOString(), itemId);
+    return this.getRemixItem(itemId)!;
+  }
+
+  setRemixProgress(itemId: string, status: RemixStatus, completedVariants?: number): void {
+    this.db.prepare(`
+      UPDATE remix_items
+      SET status = ?, completed_variants = COALESCE(?, completed_variants), error = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(status, completedVariants ?? null, new Date().toISOString(), itemId);
+  }
+
+  setRemixAnalysis(itemId: string, profile: VisualProfile, folderId?: string | null): void {
+    this.db.prepare(`
+      UPDATE remix_items
+      SET visual_profile_json = ?, folder_id = COALESCE(?, folder_id), updated_at = ?
+      WHERE id = ?
+    `).run(JSON.stringify(profile), folderId || null, new Date().toISOString(), itemId);
+    if (folderId) this.db.prepare("UPDATE remix_folders SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), folderId);
+  }
+
+  appendRemixVariants(itemId: string, variants: StoryboardVariant[]): RemixItem {
+    const item = this.getRemixItem(itemId);
+    if (!item) throw new Error("Remix-проект не найден");
+    const combined = [...item.variants, ...variants].slice(0, item.requestedVariants);
+    this.db.prepare(`
+      UPDATE remix_items SET variants_json = ?, completed_variants = ?, updated_at = ? WHERE id = ?
+    `).run(JSON.stringify(combined), combined.length, new Date().toISOString(), itemId);
+    return this.getRemixItem(itemId)!;
+  }
+
+  updateRemixVariants(itemId: string, variants: StoryboardVariant[]): RemixItem | null {
+    const result = this.db.prepare(`
+      UPDATE remix_items SET variants_json = ?, completed_variants = ?, updated_at = ? WHERE id = ?
+    `).run(JSON.stringify(variants), variants.length, new Date().toISOString(), itemId);
+    return result.changes ? this.getRemixItem(itemId) : null;
+  }
+
+  moveRemixItem(itemId: string, folderId: string | null): RemixItem | null {
+    const result = this.db.prepare("UPDATE remix_items SET folder_id = ?, auto_folder = 0, updated_at = ? WHERE id = ?")
+      .run(folderId, new Date().toISOString(), itemId);
+    return result.changes ? this.getRemixItem(itemId) : null;
+  }
+
+  queueRemixItem(itemId: string): RemixItem | null {
+    const result = this.db.prepare("UPDATE remix_items SET status = 'queued', error = NULL, updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), itemId);
+    return result.changes ? this.getRemixItem(itemId) : null;
+  }
+
+  completeRemixItem(itemId: string): void {
+    this.db.prepare(`
+      UPDATE remix_items SET status = 'ready', completed_variants = requested_variants, error = NULL, updated_at = ? WHERE id = ?
+    `).run(new Date().toISOString(), itemId);
+  }
+
+  failRemixItem(itemId: string, error: string): void {
+    this.db.prepare("UPDATE remix_items SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
+      .run(error, new Date().toISOString(), itemId);
+  }
+
   updateDraftVariants(sessionId: string, draftId: string, variants: StoryboardVariant[]): CarouselDraft | null {
     const result = this.db.prepare(`
       UPDATE carousel_drafts SET variants_json = ?, updated_at = ? WHERE id = ? AND session_id = ?
@@ -720,7 +969,21 @@ export class CarouselDatabase {
   }
 
   private mapDraft(row: DraftRow): CarouselDraft {
-    const variants = parseJson<StoryboardVariant[]>(row.variants_json, []).map((variant) => ({
+    const variants = this.normalizeVariants(parseJson<StoryboardVariant[]>(row.variants_json, []));
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      analysisRunId: row.analysis_run_id,
+      playbookId: row.playbook_id,
+      appBrief: parseJson<AppBrief>(row.app_brief_json, { appName: "", audience: "", promise: "", proof: "", cta: "", visualStyle: "", restrictions: "" }),
+      variants,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at || row.created_at,
+    };
+  }
+
+  private normalizeVariants(variants: StoryboardVariant[]): StoryboardVariant[] {
+    return variants.map((variant) => ({
       ...variant,
       slides: variant.slides.map((slide) => ({
         ...slide,
@@ -734,15 +997,42 @@ export class CarouselDatabase {
         },
       })),
     }));
+  }
+
+  private mapPost(row: PostRow): CarouselPost {
     return {
       id: row.id,
-      sessionId: row.session_id,
-      analysisRunId: row.analysis_run_id,
-      playbookId: row.playbook_id,
-      appBrief: parseJson<AppBrief>(row.app_brief_json, { appName: "", audience: "", promise: "", proof: "", cta: "", visualStyle: "", restrictions: "" }),
-      variants,
+      url: row.url,
+      author: {
+        username: row.author_username,
+        ...(row.author_display_name ? { displayName: row.author_display_name } : {}),
+      },
+      caption: row.caption,
+      ...(row.post_created_at ? { createdAt: row.post_created_at } : {}),
+      slides: parseJson(row.slides_json, []),
+      sound: parseJson(row.sound_json, {}),
+      metrics: parseJson(row.metrics_json, {}),
+    };
+  }
+
+  private mapRemixItem(row: RemixItemRow): RemixItem {
+    return {
+      id: row.id,
+      folderId: row.folder_id,
+      sourceUrl: row.source_url,
+      sourcePost: row.source_post_id ? this.getPost(row.source_post_id) : null,
+      status: row.status,
+      requestedVariants: row.requested_variants,
+      completedVariants: row.completed_variants,
+      includeApp: Boolean(row.include_app),
+      autoFolder: Boolean(row.auto_folder),
+      appBrief: parseJson<AppBrief>(row.app_brief_json, { appName: "bloatfit", audience: "", promise: "", proof: "", cta: "", visualStyle: "", restrictions: "" }),
+      instructions: row.instructions,
+      visualProfile: row.visual_profile_json ? parseJson<VisualProfile | null>(row.visual_profile_json, null) : null,
+      variants: this.normalizeVariants(parseJson<StoryboardVariant[]>(row.variants_json, [])),
+      error: row.error,
       createdAt: row.created_at,
-      updatedAt: row.updated_at || row.created_at,
+      updatedAt: row.updated_at,
     };
   }
 

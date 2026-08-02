@@ -101,7 +101,7 @@ export function startSearchJob(database: CarouselDatabase, sessionId: string): v
   if (!session) throw new Error("Исследование не найдено");
   runningJobs.add(sessionId);
   database.setSearchStarted(sessionId);
-  const perQueryLimit = Math.min(250, Math.max(20, Math.ceil((session.targetResults / Math.max(1, session.queries.length)) * 1.45)));
+  const perQueryLimit = Math.min(1_000, Math.max(20, Math.ceil((session.targetResults / Math.max(1, session.queries.length)) * 2.2)));
 
   void (async () => {
     const errors: string[] = [];
@@ -125,7 +125,9 @@ export function startSearchJob(database: CarouselDatabase, sessionId: string): v
       const fatalError = errors.length === session.queries.length
         ? errors.join("\n")
         : undefined;
-      database.setSearchFinished(sessionId, fatalError);
+      const resultCount = database.getSession(sessionId)?.resultCount || 0;
+      const partial = !fatalError && resultCount < session.targetResults;
+      database.setSearchFinished(sessionId, fatalError, partial);
     } catch (error) {
       database.setSearchFinished(sessionId, error instanceof Error ? error.message : String(error));
     } finally {

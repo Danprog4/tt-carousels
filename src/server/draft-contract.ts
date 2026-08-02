@@ -14,7 +14,7 @@ export const storyboardBatchSchema = z.object({
       source_post_ids: z.array(z.string()).max(8),
       product_slide: z.boolean(),
     })).min(4).max(12),
-  })).length(3),
+  })).min(1).max(20),
 });
 
 export type StoryboardBatch = z.infer<typeof storyboardBatchSchema>;

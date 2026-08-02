@@ -2,11 +2,11 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { AppBrief, CarouselPlaybook, ResearchBrief, SessionPost } from "../shared/types.js";
+import type { AppBrief, CarouselPlaybook, CarouselPost, ResearchBrief, SessionPost, VisualProfile } from "../shared/types.js";
 import { AI_MODEL, batchSchema, type AiBatchResult } from "./ai-contract.js";
 import { storyboardBatchSchema } from "./draft-contract.js";
 import { playbookBatchSchema } from "./playbook-contract.js";
-import { visualBatchSchema, type PreparedVisualPost } from "./visual-contract.js";
+import { visualBatchSchema, type PreparedVisualPost, type ToneReference } from "./visual-contract.js";
 
 export { AI_MODEL };
 
@@ -84,9 +84,27 @@ export function generatePlaybooks(brief: ResearchBrief, posts: unknown[]) {
   }, 165_000);
 }
 
-export function generateStoryboard(brief: ResearchBrief, playbook: CarouselPlaybook, appBrief: AppBrief, evidence: unknown[]) {
-  return runAiWorker("draft-worker.ts", { brief, playbook, appBrief, evidence }, (value) => {
+export function generateStoryboard(brief: ResearchBrief, playbook: CarouselPlaybook, appBrief: AppBrief, evidence: unknown[], toneReferences: ToneReference[]) {
+  return runAiWorker("draft-worker.ts", { brief, playbook, appBrief, evidence, toneReferences }, (value) => {
     const parsed = storyboardBatchSchema.parse(value);
     return { variants: parsed.variants, usage: (value as any).usage as { input: number; output: number } };
   }, 165_000);
+}
+
+export function generateRemixVariants(input: {
+  source: CarouselPost;
+  profile: VisualProfile;
+  appBrief: AppBrief;
+  includeApp: boolean;
+  instructions: string;
+  variantCount: number;
+  variantOffset: number;
+  totalVariants: number;
+  avoid: Array<{ title: string; angle: string }>;
+  reference: ToneReference;
+}) {
+  return runAiWorker("remix-worker.ts", input, (value) => {
+    const parsed = storyboardBatchSchema.parse(value);
+    return { variants: parsed.variants, usage: (value as any).usage as { input: number; output: number } };
+  }, 195_000);
 }

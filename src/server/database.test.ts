@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { CarouselPost, PinterestImage, ResearchBrief } from "../shared/types.js";
+import type { CarouselPost, PinterestImage, ResearchBrief, StoryboardVariant } from "../shared/types.js";
 import { CarouselDatabase } from "./database.js";
 
 const temporaryDirectories: string[] = [];
@@ -152,5 +152,49 @@ describe("CarouselDatabase", () => {
     expect(updated.defaultQueries).toEqual(["puffy face men", "morning depuff"]);
     expect(updated.defaultTarget).toBe(500);
     expect(updated.runs.map((run) => run.runNumber)).toEqual([2, 1]);
+  });
+
+  it("does not mark an exhausted search as complete when it missed the target", () => {
+    const database = databaseForTest();
+    const session = database.createSession({ title: "Research", brief, queries: ["face debloat"], targetResults: 100 });
+
+    database.setSearchFinished(session.id, undefined, true);
+
+    expect(database.getSession(session.id)?.status).toBe("partial");
+  });
+
+  it("persists Remix history, folders and an arbitrary number of variants", () => {
+    const database = databaseForTest();
+    database.upsertSourcePost(post);
+    const folder = database.createRemixFolder("Routine · UGC");
+    const item = database.createRemixItem({
+      sourceUrl: post.url,
+      sourcePostId: post.id,
+      folderId: folder.id,
+      autoFolder: false,
+      requestedVariants: 10,
+      includeApp: true,
+      appBrief: { appName: "bloatfit", audience: "men", promise: "personal plan", proof: "AI scan", cta: "App Store", visualStyle: "UGC", restrictions: "" },
+      instructions: "Short hooks",
+    });
+    const variant: StoryboardVariant = {
+      title: "Morning reset",
+      angle: "A short routine",
+      slides: [{
+        index: 1,
+        role: "hook",
+        copy: "Your morning face needs this",
+        visualBrief: "Selfie in soft daylight",
+        sourcePostIds: [post.id],
+        productSlide: false,
+        design: { pinterestQuery: "man morning selfie", selectedImage: null, textPosition: "center", textAlign: "center", overlayStyle: "scrim", textScale: 1.15 },
+      }],
+    };
+    database.updateRemixVariants(item.id, Array.from({ length: 10 }, (_, index) => ({ ...variant, title: `${variant.title} ${index + 1}` })));
+
+    expect(database.listRemixFolders()[0]).toMatchObject({ id: folder.id, itemCount: 1 });
+    expect(database.getRemixItem(item.id)).toMatchObject({ requestedVariants: 10, completedVariants: 10, sourcePost: { id: post.id } });
+    expect(database.getRemixItem(item.id)?.variants).toHaveLength(10);
+    expect(database.moveRemixItem(item.id, null)?.folderId).toBeNull();
   });
 });

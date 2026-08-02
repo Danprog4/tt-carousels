@@ -38,13 +38,15 @@ The result is not a generic AI carousel. Every playbook remains traceable to rea
 
 - **No scraping API required.** Uses a dedicated, visible Chrome profile that you sign into yourself.
 - **TikTok photo carousels only.** Captures every slide, creator, caption, search rank, and available engagement metrics.
-- **Research at useful scale.** Run 50-result tests or larger 500–1,000-result passes split into sequential query batches.
+- **Research at useful scale.** Run 50-result tests or multi-thousand-result passes split into sequential query batches.
 - **Cost-aware AI pipeline.** Cheap metadata ranking happens first; visual analysis runs only on the selected corpus.
 - **Human-in-the-loop review.** Keep, maybe, skip, and pin decisions override AI without destroying the original assessment.
 - **Performance-aware ordering.** Posts below 1,000 known views are kept for inspection but moved to the bottom and excluded from AI spend.
 - **Multi-axis pattern mining.** Classifies visual source, narrative structure, slide roles, and product-funnel mechanics independently.
 - **Evidence-backed playbooks.** Reusable content systems retain their supporting posts, creators, and median metrics.
 - **Product-aware generation.** Every storyboard includes a native app transition and App Store CTA, even when the source carousel had no ad.
+- **Single-source Remix.** Paste one TikTok carousel or send it directly from research, choose up to 20 distinct variants, and let import, visual analysis, and generation continue in the background.
+- **Format folders.** Keep Remix sources grouped by format with manual folders or automatic AI suggestions.
 - **Pinterest production desk.** Queries are generated per slide, searched in the background, cached, and restored instantly on reopen.
 - **Autosave everywhere.** Editor actions are written immediately to `localStorage` and synchronized to SQLite automatically.
 - **Flexible export.** Download `1080×1920` PNGs with text, clean images without text, the full copy, and source links.
@@ -144,7 +146,7 @@ Each project behaves like a folder. A pass is a separate scrape with its own res
 
 Use the `+` beside a project to create a new pass. Carousel Lab can:
 
-- target 100, 300, 500, or 1,000 unique results;
+- target 100, 300, 500, 1,000, or more unique results;
 - divide the work across multiple search-query batches;
 - stop once the target is reached;
 - exclude posts already seen in previous passes;
@@ -186,7 +188,13 @@ Every variant contains one or two product slides. The app is inserted only after
 
 The included defaults use `bloatfit` as an example app brief; replace them with your own product details before generating.
 
-### 6. Source visuals and edit
+### 6. Remix one strong source
+
+Open **Remix**, paste a public TikTok photo-carousel URL, and configure the number of variants, folder, app integration, and any extra rules before starting. The source is imported and analyzed once; variants are then generated and saved in small background batches. A source already visible in research can be sent to the same form with its **Remix** button.
+
+Remix variants may change slide count, order, and framing while keeping the source's useful hook and swipe mechanics. The original slides remain visible as a permanent reference inside the editor.
+
+### 7. Source visuals and edit
 
 Each non-product slide receives a concrete Pinterest query. When the editor remains open for five seconds, missing unique queries run sequentially in the background.
 
@@ -200,7 +208,7 @@ All editor changes autosave:
 - active storyboard tab and slide;
 - cached Pinterest candidates.
 
-### 7. Export
+### 8. Export
 
 - **ZIP with text** — rendered `1080×1920` PNG slides using TikTok Sans.
 - **ZIP without text** — clean images for adding native text inside TikTok or another editor.

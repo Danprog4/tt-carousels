@@ -47,3 +47,10 @@ export interface PreparedVisualPost {
   coverBase64: string;
   contactSheetBase64: string;
 }
+
+export interface ToneReference {
+  postId: string;
+  creator: string;
+  caption: string;
+  slidesBase64: string[];
+}

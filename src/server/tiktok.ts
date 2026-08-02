@@ -94,6 +94,7 @@ async function captureSearchBodies(query: string, limit: number, endpoint: strin
   return backgroundPage(endpoint, async (page) => {
     const bodies: Obj[] = [];
     const pending = new Set<Promise<void>>();
+    let hasMore = true;
     page.on("response", (response) => {
       let pathname = "";
       try {
@@ -103,7 +104,11 @@ async function captureSearchBodies(query: string, limit: number, endpoint: strin
       }
       if (pathname !== "/api/search/photo/full/") return;
       const task = response.json()
-        .then((body) => void bodies.push(objectOf(body)))
+        .then((body) => {
+          const parsed = objectOf(body);
+          bodies.push(parsed);
+          hasMore = Boolean(parsed.has_more ?? parsed.hasMore ?? true);
+        })
         .catch(() => undefined)
         .finally(() => pending.delete(task));
       pending.add(task);
@@ -113,10 +118,31 @@ async function captureSearchBodies(query: string, limit: number, endpoint: strin
       timeout: 45_000,
     });
     await page.waitForTimeout(2_500);
-    const rounds = Math.min(24, Math.max(2, Math.ceil(limit / 12) + 1));
+    const rounds = Math.min(100, Math.max(3, Math.ceil(limit / 12) + 8));
+    let stalledRounds = 0;
     for (let index = 0; index < rounds; index += 1) {
-      await page.mouse.wheel(0, 1_600);
-      await page.waitForTimeout(750);
+      await Promise.allSettled([...pending]);
+      const capturedItems = bodies.reduce((total, body) => total + responseItems(body).length, 0);
+      if (capturedItems >= limit || !hasMore || stalledRounds >= 3) break;
+
+      const bodyCountBeforeScroll = bodies.length;
+      const nextPage = page.waitForResponse((response) => {
+        try {
+          return new URL(response.url()).pathname === "/api/search/photo/full/";
+        } catch {
+          return false;
+        }
+      }, { timeout: 5_000 }).catch(() => null);
+      const searchGrid = page.locator("#grid-main");
+      if (await searchGrid.count()) {
+        await searchGrid.evaluate((element) => element.scrollTo(0, element.scrollHeight));
+      } else {
+        await page.mouse.wheel(0, 1_600);
+      }
+      await nextPage;
+      await page.waitForTimeout(350);
+      await Promise.allSettled([...pending]);
+      stalledRounds = bodies.length === bodyCountBeforeScroll ? stalledRounds + 1 : 0;
     }
     await Promise.allSettled([...pending]);
     return bodies;
@@ -160,4 +186,28 @@ export async function searchTikTokQuery(input: {
       return true;
     });
   return posts.slice(0, input.limit);
+}
+
+export async function fetchTikTokPost(input: { url: string; endpoint?: string }): Promise<CarouselPost> {
+  const submitted = new URL(input.url);
+  if (submitted.protocol !== "https:" || !submitted.hostname.toLowerCase().includes("tiktok.com")) {
+    throw new Error("Нужна публичная ссылка на TikTok-карусель");
+  }
+  const endpoint = input.endpoint || process.env.CHROME_CDP_ENDPOINT || DEFAULT_CDP_ENDPOINT;
+  return backgroundPage(endpoint, async (page) => {
+    const detailResponse = page.waitForResponse((response) => {
+      try {
+        return new URL(response.url()).pathname === "/api/item/detail/";
+      } catch {
+        return false;
+      }
+    }, { timeout: 45_000 });
+    await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    const response = await detailResponse;
+    const body = objectOf(await response.json());
+    const item = objectOf(objectOf(body.itemInfo).itemStruct);
+    const post = normalizePost(item);
+    if (!post) throw new Error("По ссылке не найдена публичная TikTok photo-карусель");
+    return post;
+  });
 }

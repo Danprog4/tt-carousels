@@ -1,7 +1,7 @@
 export type DecisionStatus = "skip" | "maybe" | "relevant";
 export type HumanStatus = DecisionStatus | null;
 export type AiStatus = DecisionStatus | "pending";
-export type SessionStatus = "draft" | "searching" | "complete" | "failed" | "interrupted";
+export type SessionStatus = "draft" | "searching" | "complete" | "partial" | "failed" | "interrupted";
 export type VisualSource = "pinterest_like" | "ugc_selfie" | "stock_editorial" | "ai_photoreal" | "ai_illustration" | "ai_mascot" | "app_screenshots" | "meme_template" | "mixed" | "unknown";
 export type LayoutStyle = "single_image_text" | "collage" | "card_template" | "screenshot_stack" | "before_after" | "illustrated_sequence" | "mixed";
 export type ContentStructure = "tips_list" | "mistakes_fixes" | "routine" | "tutorial" | "before_after" | "story" | "ranking" | "myths_facts" | "problem_solution" | "product_demo" | "other";
@@ -194,6 +194,35 @@ export interface AppBrief {
   cta: string;
   visualStyle: string;
   restrictions: string;
+}
+
+export type RemixStatus = "queued" | "importing" | "analyzing" | "generating" | "ready" | "failed" | "interrupted";
+
+export interface RemixFolder {
+  id: string;
+  name: string;
+  itemCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RemixItem {
+  id: string;
+  folderId: string | null;
+  sourceUrl: string;
+  sourcePost: CarouselPost | null;
+  status: RemixStatus;
+  requestedVariants: number;
+  completedVariants: number;
+  includeApp: boolean;
+  autoFolder: boolean;
+  appBrief: AppBrief;
+  instructions: string;
+  visualProfile: VisualProfile | null;
+  variants: StoryboardVariant[];
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface CarouselDraft {

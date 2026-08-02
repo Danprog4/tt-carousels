@@ -12,8 +12,22 @@ import type {
   CarouselProject,
   PatternAnalysisRun,
   PinterestImage,
+  RemixFolder,
+  RemixItem,
   StoryboardVariant,
 } from "../shared/types";
+
+export type RemixItemWithRuntime = RemixItem & { running?: boolean };
+export interface CreateRemixInput {
+  sourceUrl: string;
+  sourcePostId?: string;
+  folderId?: string | null;
+  autoFolder: boolean;
+  requestedVariants: number;
+  includeApp: boolean;
+  appBrief: AppBrief;
+  instructions: string;
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -33,6 +47,25 @@ export const api = {
   listSessions: () => request<{ sessions: ResearchSessionSummary[] }>("/api/sessions"),
   listProjects: () => request<{ projects: ResearchProject[] }>("/api/projects"),
   listDrafts: () => request<{ drafts: CarouselProject[] }>("/api/drafts"),
+  listRemix: () => request<{ folders: RemixFolder[]; items: RemixItemWithRuntime[] }>("/api/remix"),
+  createRemixFolder: (name: string) => request<RemixFolder>("/api/remix/folders", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  }),
+  createRemix: (input: CreateRemixInput) => request<RemixItemWithRuntime>("/api/remix/items", {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  getRemix: (id: string) => request<RemixItemWithRuntime>(`/api/remix/items/${id}`),
+  retryRemix: (id: string) => request<RemixItemWithRuntime>(`/api/remix/items/${id}/retry`, { method: "POST" }),
+  saveRemix: (id: string, variants: StoryboardVariant[]) => request<RemixItem>(`/api/remix/items/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ variants }),
+  }),
+  moveRemix: (id: string, folderId: string | null) => request<RemixItem>(`/api/remix/items/${id}/folder`, {
+    method: "PATCH",
+    body: JSON.stringify({ folderId }),
+  }),
   getSession: (id: string) => request<ResearchSession & { searchRunning: boolean; aiJob: AiJobSnapshot }>(`/api/sessions/${id}`),
   createSession: (input: { title: string; brief: ResearchBrief; queries: string[]; targetResults: number }) =>
     request<ResearchSession>("/api/sessions", { method: "POST", body: JSON.stringify(input) }),
@@ -83,6 +116,18 @@ export const api = {
     }),
   exportDraft: async (sessionId: string, draftId: string, variantIndex: number, includeText = true) => {
     const response = await fetch(`/api/sessions/${sessionId}/drafts/${draftId}/export`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ variantIndex, includeText }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+    return response.blob();
+  },
+  exportRemix: async (itemId: string, variantIndex: number, includeText = true) => {
+    const response = await fetch(`/api/remix/items/${itemId}/export`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ variantIndex, includeText }),

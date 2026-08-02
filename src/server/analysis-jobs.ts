@@ -1,9 +1,10 @@
 import type { AppBrief, CarouselDraft, PatternAnalysisRun, SessionPost, StoryboardVariant } from "../shared/types.js";
 import { isLowTraction } from "../shared/ranking.js";
 import { analyzeVisualBatch, generatePlaybooks, generateStoryboard } from "./ai.js";
-import { prepareVisualPost } from "./contact-sheet.js";
+import { prepareToneReference, prepareVisualPost } from "./contact-sheet.js";
 import { CarouselDatabase } from "./database.js";
 import { buildCategorySummaries, compactPatternEvidence, enrichPlaybooks, mapVisualProfile } from "./patterns.js";
+import { simplePinterestQuery } from "./storyboard-style.js";
 
 const VISUAL_BATCH_SIZE = 4;
 const runningSessions = new Set<string>();
@@ -96,7 +97,18 @@ export async function createStoryboardDraft(database: CarouselDatabase, input: {
   const playbook = analysis.playbooks.find((item) => item.id === input.playbookId);
   if (!playbook) throw new Error("Playbook не найден");
   const evidencePosts = session.posts.filter((post) => playbook.postIds.includes(post.id));
-  const result = await generateStoryboard(session.brief, playbook, input.appBrief, compactPatternEvidence(evidencePosts));
+  const toneReferences = [];
+  const strongestReferences = [...evidencePosts]
+    .sort((left, right) => Number(right.pinned) - Number(left.pinned) || (right.metrics.views || 0) - (left.metrics.views || 0))
+    .slice(0, 1);
+  for (const post of strongestReferences) {
+    try {
+      toneReferences.push(await prepareToneReference(post));
+    } catch {
+      // The evidence profile still lets generation continue if a signed image URL has expired.
+    }
+  }
+  const result = await generateStoryboard(session.brief, playbook, input.appBrief, compactPatternEvidence(evidencePosts), toneReferences);
   const knownIds = new Set(evidencePosts.map((post) => post.id));
   const variants: StoryboardVariant[] = result.variants.map((variant) => ({
     title: variant.title,
@@ -109,7 +121,7 @@ export async function createStoryboardDraft(database: CarouselDatabase, input: {
       sourcePostIds: slide.source_post_ids.filter((id) => knownIds.has(id)),
       productSlide: slide.product_slide,
       design: {
-        pinterestQuery: slide.product_slide ? "" : slide.pinterest_query,
+        pinterestQuery: slide.product_slide ? "" : simplePinterestQuery(slide.pinterest_query),
         selectedImage: null,
         textPosition: slide.role === "hook" ? "center" : "bottom",
         textAlign: slide.role === "hook" ? "center" : "left",

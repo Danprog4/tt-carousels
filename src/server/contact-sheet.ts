@@ -3,8 +3,8 @@ import { existsSync, mkdirSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import sharp from "sharp";
-import type { SessionPost } from "../shared/types.js";
-import type { PreparedVisualPost } from "./visual-contract.js";
+import type { CarouselPost } from "../shared/types.js";
+import type { PreparedVisualPost, ToneReference } from "./visual-contract.js";
 import { getCachedThumbnail } from "./media-cache.js";
 
 const SHEET_CACHE = resolve(process.cwd(), "data/cache/contact-sheets");
@@ -13,7 +13,7 @@ const TILE_HEIGHT = 338;
 const GAP = 10;
 const COLUMNS = 4;
 
-async function loadSlide(post: SessionPost, index: number): Promise<Buffer> {
+async function loadSlide(post: CarouselPost, index: number): Promise<Buffer> {
   const slide = post.slides[index];
   if (!slide) throw new Error(`Слайд ${index + 1} не найден`);
   if (slide.imageUrl.startsWith("https://")) return getCachedThumbnail(slide.imageUrl);
@@ -32,7 +32,7 @@ async function numberedTile(source: Buffer, index: number): Promise<Buffer> {
     .toBuffer();
 }
 
-export async function prepareVisualPost(post: SessionPost): Promise<PreparedVisualPost> {
+export async function prepareVisualPost(post: CarouselPost): Promise<PreparedVisualPost> {
   if (!post.slides.length) throw new Error(`У @${post.author.username} нет доступных слайдов`);
   mkdirSync(SHEET_CACHE, { recursive: true });
   const fingerprint = createHash("sha256")
@@ -84,5 +84,24 @@ export async function prepareVisualPost(post: SessionPost): Promise<PreparedVisu
     },
     coverBase64: cover.toString("base64"),
     contactSheetBase64: contactSheet.toString("base64"),
+  };
+}
+
+export async function prepareToneReference(post: CarouselPost): Promise<ToneReference> {
+  if (!post.slides.length) throw new Error(`У @${post.author.username} нет доступных слайдов`);
+  const slidesBase64: string[] = [];
+  for (let index = 0; index < Math.min(15, post.slides.length); index += 1) {
+    const source = await loadSlide(post, index);
+    const readable = await sharp(source)
+      .resize({ width: 640, height: 1_138, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 84, progressive: true })
+      .toBuffer();
+    slidesBase64.push(readable.toString("base64"));
+  }
+  return {
+    postId: post.id,
+    creator: post.author.username,
+    caption: post.caption,
+    slidesBase64,
   };
 }
