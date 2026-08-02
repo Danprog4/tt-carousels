@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+.idea/
+.vscode/
+coverage/
+
+# Kept locally for comparison; copied from an external unlicensed gist.
+tiktok-carousel-research-portable.ts
